@@ -1,9 +1,8 @@
+import express from "express";
 import dotenv from "dotenv";
+import { MongoClient, ObjectId } from "mongodb";
+
 dotenv.config();
-
-const express = require("express");
-const { MongoClient, ObjectId } = require("mongodb");
-
 const app = express();
 
 const PORT = process.env.PORT || 3000;
@@ -41,13 +40,6 @@ connectDB();
 
 // GET /
 app.get("/", (req, res) => {
-  res.send(`
-    <h1>Products API</h1>
-    <ul>
-      <li><a href="/api/products">/api/products</a></li>
-      <li><a href="/api/products/1">/api/products/:id</a></li>
-    </ul>
-  `);
   res.json({ message: "Products API is running" });
 });
 
@@ -140,6 +132,18 @@ app.use((req, res) => {
 });
 
 // server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+async function startServer() {
+  try {
+    await client.connect();
+    db = client.db("shop");
+    console.log("Connected to MongoDB");
+
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (err) {
+    console.error("MongoDB connection error:", err);
+  }
+}
+
+startServer();
