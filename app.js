@@ -48,6 +48,7 @@ app.get("/", (req, res) => {
       <li><a href="/api/products/1">/api/products/:id</a></li>
     </ul>
   `);
+  res.json({ message: "Products API is running" });
 });
 
 // GET /api/products
