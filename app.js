@@ -8,137 +8,254 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const MONGO_URI = process.env.MONGO_URI;
 
-// Logger middleware
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.url}`);
   next();
 });
 
-// JSON body parser
 app.use(express.json());
 
-// mongodb
-
-const url = MONGO_URI;
-const client = new MongoClient(url);
-
+const client = new MongoClient(MONGO_URI);
 let db;
 
-async function connectDB() {
-  try {
-    await client.connect();
-    db = client.db("shop");
-    console.log("Connected to MongoDB");
-  } catch (err) {
-    console.error("MongoDB connection error:", err);
-  }
+// helper: safe error
+function handleServerError(res, err) {
+  console.error(err);
+  return res.status(500).json({ error: "Internal server error" });
 }
 
-connectDB();
-
-// routes
-
-// GET /
-app.get("/", (req, res) => {
-  res.json({ message: "Products API is running" });
-});
-
-app.get("/version", (req, res) => {
-  res.json({
-    version: "1.1",
-    updatedAt: "2026-01-23",
-  });
-});
-
-// GET /api/products
-app.get("/api/products", async (req, res) => {
-  const filter = {};
-  let sortOption = {};
-  let projection = {};
-
-  // Filter by category
-  if (req.query.category) {
-    filter.category = req.query.category;
-  }
-
-  // Filter by minimum price
-  if (req.query.minPrice) {
-    filter.price = { $gte: Number(req.query.minPrice) };
-  }
-
-  // Sort by price (ascending)
-  if (req.query.sort === "price") {
-    sortOption = { price: 1 };
-  }
-
-  // Projection (selected fields)
-  if (req.query.fields) {
-    projection._id = 0;
-
-    const fieldsArray = req.query.fields.split(",");
-    fieldsArray.forEach((field) => {
-      projection[field] = 1;
-    });
-  }
-
-  const products = await db
-    .collection("products")
-    .find(filter, { projection })
-    .sort(sortOption)
-    .toArray();
-
-  res.json({
-    count: products.length,
-    products,
-  });
-});
-
-// GET /api/products/:id
-app.get("/api/products/:id", async (req, res) => {
-  const { id } = req.params;
-
+// helper: validate objectId
+function validateId(res, id) {
   if (!ObjectId.isValid(id)) {
-    return res.status(400).json({ error: "Invalid product id" });
+    res.status(400).json({ error: "Invalid item id" });
+    return false;
+  }
+  return true;
+}
+
+// helper: basic validation for item
+// required fields for creating/updating:
+const REQUIRED_FIELDS = ["name", "price", "category"];
+
+function validateRequiredFields(res, body) {
+  const missing = REQUIRED_FIELDS.filter(
+    (f) => body[f] === undefined || body[f] === null || body[f] === "",
+  );
+  if (missing.length > 0) {
+    res.status(400).json({ error: "Missing required fields", missing });
+    return false;
   }
 
-  const product = await db
-    .collection("products")
-    .findOne({ _id: new ObjectId(id) });
-
-  if (!product) {
-    return res.status(404).json({ error: "Product not found" });
+  if (typeof body.name !== "string") {
+    res.status(400).json({ error: "Field 'name' must be a string" });
+    return false;
+  }
+  if (typeof body.category !== "string") {
+    res.status(400).json({ error: "Field 'category' must be a string" });
+    return false;
+  }
+  if (
+    typeof body.price !== "number" ||
+    Number.isNaN(body.price) ||
+    body.price < 0
+  ) {
+    res
+      .status(400)
+      .json({ error: "Field 'price' must be a non-negative number" });
+    return false;
   }
 
-  res.json(product);
+  return true;
+}
+
+function validatePatchFields(res, body) {
+  const allowed = ["name", "price", "category", "description"];
+  const keys = Object.keys(body);
+
+  if (keys.length === 0) {
+    res.status(400).json({ error: "PATCH body cannot be empty" });
+    return false;
+  }
+
+  const invalid = keys.filter((k) => !allowed.includes(k));
+  if (invalid.length > 0) {
+    res
+      .status(400)
+      .json({ error: "Invalid fields in PATCH", invalid, allowed });
+    return false;
+  }
+
+  if (body.name !== undefined && typeof body.name !== "string") {
+    res.status(400).json({ error: "Field 'name' must be a string" });
+    return false;
+  }
+  if (body.category !== undefined && typeof body.category !== "string") {
+    res.status(400).json({ error: "Field 'category' must be a string" });
+    return false;
+  }
+  if (body.price !== undefined) {
+    if (
+      typeof body.price !== "number" ||
+      Number.isNaN(body.price) ||
+      body.price < 0
+    ) {
+      res
+        .status(400)
+        .json({ error: "Field 'price' must be a non-negative number" });
+      return false;
+    }
+  }
+  if (body.description !== undefined && typeof body.description !== "string") {
+    res.status(400).json({ error: "Field 'description' must be a string" });
+    return false;
+  }
+
+  return true;
+}
+
+// Root
+app.get("/", (req, res) => {
+  res.json({ message: "Items API is running" });
 });
 
-// POST /api/products
-app.post("/api/products", async (req, res) => {
-  const { name, price, category } = req.body;
-
-  if (!name || !price || !category) {
-    return res.status(400).json({ error: "Missing required fields" });
+// GET /api/items - retrieve all items
+app.get("/api/items", async (req, res) => {
+  try {
+    const items = await db.collection("items").find({}).toArray();
+    res.status(200).json({ count: items.length, items });
+  } catch (err) {
+    return handleServerError(res, err);
   }
+});
 
-  const result = await db.collection("products").insertOne({
-    name,
-    price,
-    category,
-  });
+// GET /api/items/:id - retrieve item by ID
+app.get("/api/items/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!validateId(res, id)) return;
 
-  res.status(201).json({
-    message: "Product created",
-    id: result.insertedId,
-  });
+    const item = await db
+      .collection("items")
+      .findOne({ _id: new ObjectId(id) });
+    if (!item) return res.status(404).json({ error: "Item not found" });
+
+    res.status(200).json(item);
+  } catch (err) {
+    return handleServerError(res, err);
+  }
+});
+
+// POST /api/items - create a new item
+app.post("/api/items", async (req, res) => {
+  try {
+    const { name, price, category, description } = req.body;
+
+    if (!validateRequiredFields(res, { name, price, category })) return;
+
+    const result = await db.collection("items").insertOne({
+      name,
+      price,
+      category,
+      description: description ?? "",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    res.status(201).json({
+      message: "Item created",
+      id: result.insertedId,
+    });
+  } catch (err) {
+    return handleServerError(res, err);
+  }
+});
+
+// PUT /api/items/:id - full update
+app.put("/api/items/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!validateId(res, id)) return;
+
+    const { name, price, category, description } = req.body;
+
+    // PUT = full update => required fields must exist
+    if (!validateRequiredFields(res, { name, price, category })) return;
+
+    const result = await db.collection("items").updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          name,
+          price,
+          category,
+          description: description ?? "",
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: "Item not found" });
+    }
+
+    res.status(200).json({ message: "Item fully updated" });
+  } catch (err) {
+    return handleServerError(res, err);
+  }
+});
+
+// PATCH /api/items/:id - partial update
+app.patch("/api/items/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!validateId(res, id)) return;
+
+    const patchData = req.body;
+    if (!validatePatchFields(res, patchData)) return;
+
+    patchData.updatedAt = new Date();
+
+    const result = await db
+      .collection("items")
+      .updateOne({ _id: new ObjectId(id) }, { $set: patchData });
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: "Item not found" });
+    }
+
+    res.status(200).json({ message: "Item partially updated" });
+  } catch (err) {
+    return handleServerError(res, err);
+  }
+});
+
+// DELETE /api/items/:id - delete an item
+app.delete("/api/items/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!validateId(res, id)) return;
+
+    const result = await db
+      .collection("items")
+      .deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: "Item not found" });
+    }
+
+    // 204 = no content
+    res.status(204).send();
+  } catch (err) {
+    return handleServerError(res, err);
+  }
 });
 
 // 404 handler
-
 app.use((req, res) => {
   res.status(404).json({ error: "API endpoint not found" });
 });
 
-// server
+// Start server + connect DB
 async function startServer() {
   try {
     await client.connect();
